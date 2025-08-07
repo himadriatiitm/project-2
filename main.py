@@ -9,8 +9,6 @@ import ssl
 import duckdb
 from pathlib import Path
 import re
-from copy import deepcopy as copy
-from pydantic import BaseModel
 
 ssl._create_default_https_context = ssl._create_unverified_context
 
@@ -40,15 +38,6 @@ app = FastAPI()
 model = llm.get_model("gpt-4o-mini")
 model.key = os.environ["OPENAI_API_KEY"]
 
-def copycopy(a):
-    b = {}
-    for a_i in a:
-        try:
-            b[a_i] = copy(a_i)
-        except TypeError:
-            b[a_i] = a[a_i]
-    return b
-
 @app.post("/api/")
 async def upload_file(file: List[UploadFile]):
     """
@@ -60,8 +49,6 @@ async def upload_file(file: List[UploadFile]):
             filename = Path(handle.filename).name
             if filename == 'question.txt':
                 question = (await handle.read()).decode()
-                question += "\n"
-                question += "Finally, store the output list in the identifier `result_list`."
                 continue
             Path(filename).write_bytes(await handle.read())
     except Exception as e:
@@ -82,48 +69,54 @@ async def upload_file(file: List[UploadFile]):
     return Response(content=answer, media_type='application/json')
     return answer
 
-class LastKnownGood(BaseModel):
-    namespace: Dict[str, Any]
-    code: str
-
 @func_set_timeout(180)
 def answer_attempt(question):
     local_namespace: Dict[str, Any] = {}
     # I swear I hate this god awful snake language.
     # Take me back to C.
-    last_known_good = LastKnownGood(namespace={}, code = "")
-    code: str = ""
+    code: str | None = None
+    last_known_good_code: str = ""
     result: Any | Exception = None
-    while 'result_list' not in local_namespace:
-        try:
-            code = broad_eval(question, list(local_namespace), last_known_good.code, truncate_string(result))
-        except Exception as e:
-            print(e)
-            continue
-        print("== LLM says " + '=' * 68)
-        print(code)
-        print('=' * 80)
-        result = None
-        try:
-            result = evaluate_code(code, local_namespace)
-        except FunctionTimedOut:
-            result = "<timeout />"
-        except Exception as e:
-            result = e
-            print(e)
-            # we messed up, reset namespace
-            local_namespace = last_known_good.namespace
-            last_known_good.namespace = copycopy(local_namespace)
-            continue
-        last_known_good.code += "\n" + code
-        last_known_good.namespace = copycopy(local_namespace)
+    steps = breakdown(question)
+    i = 0
+    while i < len(steps):
+        instr = steps[i]
+        ok = False
+        while not ok:
+            try:
+                if isinstance(result, Exception):
+                    code = rectify_code(instr, truncate_string(result), last_known_good_code, code)
+                else:
+                    code = broad_eval(question, instr, list(local_namespace), last_known_good_code, truncate_string(result))
+            except Exception as e:
+                print(e)
+                continue
+            print("== LLM says " + '=' * 68)
+            print(code)
+            print('=' * 80)
+            result = None
+            try:
+                result = evaluate_code(code, local_namespace)
+            except FunctionTimedOut:
+                result = "<timeout />"
+            except Exception as e:
+                result = e
+                continue
 
-        if match := re.match(r'(\w+)\s*=\s*json.dumps', code):
-            result_id = match.group(1)
-            return local_namespace[result_id]
+            if wanna_backtrack(result, local_namespace, code):
+                # backtrack
+                i -= 2
 
-        print(truncate_string(str(result)))
-        print(format_ns(local_namespace))
+            ok = True
+            last_known_good_code += "\n" + code
+
+            if match := re.match(r'(\w+)\s*=\s*json.dumps', code):
+                result_id = match.group(1)
+                return local_namespace[result_id]
+
+            print(truncate_string(str(result)))
+            print(format_ns(local_namespace))
+        i += 1
 
     return result
     
@@ -161,12 +154,12 @@ def rectify_code(objective: str, result: str, prev_cell: str, last_code: str) ->
         "Rectify your previous code according to the errors. Each step is exploratory so you decide to print and examine the outputs when needed."
     )
     prompt = f"""
-Code that executed successfully so far, not necessarily correct:
+Code that executed successfully so far:
 ```python
 {prev_cell}
 ```
 
-Code you executed this time:
+Code:
 ```python
 # {objective}
 {last_code}
@@ -180,7 +173,31 @@ Error:
     response = model.prompt(prompt, system=system).text()
     return extract_code(response)
 
-def broad_eval(question:str, ns: List[str], last_code, result) -> str:
+def wanna_backtrack(result: Any, ns: List[str], last_code) -> str:
+    system = """
+Make sure that the variables you created are actually present in the local namespace.
+Respond with
+- YES: to proceed to then ext step.
+- BACKTRACK: to go back to a previous step.
+"""
+    result = truncate_string(str(result), 200)
+    ns = format_ns(ns)
+    proompt = f"""
+Your code:
+```python
+{last_code}
+```
+
+<output>
+{result}
+</output>
+
+<locals>{ns}</locals>
+"""
+    response = model.prompt(proompt, system=system).text()
+    return "BACKTRACK" in response
+
+def broad_eval(question:str, instr: str, ns: List[str], last_code, result) -> str:
     system = (
         "You are a senior Python developer with a lot of experience in data science frameworks.\n"
         "You use succinct code that gets the job done without relying too much on extraneous libraries.\n"
@@ -206,9 +223,23 @@ output:
 {result}
 ```
 """
-    response = model.prompt(f"{question}\n```python\n# Just a single step. Preferably < 5 lines of code. Always inspect output with print in the end.", system=system).text()
+    response = model.prompt("```python\n# " + instr, system=system).text()
     return extract_code(response)
 
+
+def breakdown(question: str) -> List[str]:
+    system = """Break the following question down into a list of steps to be taken in Python.
+Use links and filenames as verbatim. Describe each step in a single line.
+If the step does not fit in a line, break it down further. Answer only the list of steps so that our API can ingest them with ease.
+
+Example:
+
+1. Scrape the table from https://doc.e.foundation/devices
+2. Read the image `phone.png` into variable `img` with PIL
+"""
+
+    response = model.prompt(question, system=system).text()
+    return response.splitlines()
 
 if __name__ == "__main__":
     import uvicorn
