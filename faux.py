@@ -20,17 +20,20 @@ Rules:
     response = response[response.index('['):]
     response = response[:response.rindex(']')+1]
     logging.info(response)
-    try:
-        faux = json.loads(response)
-    except Exception as e:
-        logging.error(e)
-        return None
-
-    if isinstance(faux, List):
-        return faux
-    return None
+    return list_verify(json_verify(response))
 
 def forge(question: str, model) -> List[Any]:
     while True:
         if faux := _forge(question, model):
             return faux
+
+def json_verify(response: str):
+    try:
+        return json.loads(response)
+    except Exception as e:
+        logging.error(e)
+        return None
+
+def list_verify(v):
+    if isinstance(v, List):
+        return v
