@@ -1,6 +1,3 @@
-import sys
-from pprint import pprint
-import traceback
 import sandbox
 from fastapi import FastAPI, UploadFile, HTTPException, Response
 from typing import List, Any, Dict
@@ -17,41 +14,19 @@ from pathlib import Path
 import json
 import tools
 import io
-import inspect
+import agent
 import contextlib
 from iochain import IOBlock, IOChain
 from dataclasses import dataclass
+import logging
 
+# basic monkey-patching
+logging.basicConfig(level=logging.INFO)
 ssl._create_default_https_context = ssl._create_unverified_context
 
 
 def format_ns(ns) -> str:
     return " ".join(list(ns))
-
-# AVAILABLE_FUNCTIONS = ""
-
-# for fn in tools.__all__:
-#     doc = inspect.getdoc(fn)
-#     sig = str(inspect.signature(fn))
-#     name = fn.__name__
-#     AVAILABLE_FUNCTIONS += f"""
-# tools.{name}{sig}
-# {doc}
-# """
-
-# AVAILABLE_FUNCTIONS = f"""
-# <available-functions>
-# {AVAILABLE_FUNCTIONS}
-# </available-functions>
-# """
-
-# print(AVAILABLE_FUNCTIONS)
-
-AGENT_SEED = (
-    "You are a senior Python developer with a lot of experience in data science frameworks.\n"
-    "You use succinct code that gets the job done without relying too much on extraneous libraries.\n"
-    "Never write comments. There is only one correct way to solve a given problem. - The Zen of Python\n\n"
-)
 
 @func_set_timeout(20)
 def evaluate_code(code, ns):
@@ -82,9 +57,6 @@ def evaluate_code(code, ns):
 
     if stdout := stdout_buffer.getvalue():
         return stdout
-
-    if result_id := next(iter(ns)):
-        return ns[result_id]
 
 
 app = FastAPI()
@@ -127,21 +99,19 @@ async def upload_file(file: List[UploadFile]):
 
 
 
-@func_set_timeout(90)
+@func_set_timeout(180)
 def answer_attempt(question):
     ns: Dict[str, Any] = {}
-    # I swear I hate this god awful snake language.
-    # Take me back to C.
     io_chain = IOChain([])
     steps = must_breakdown(question)
-    print(steps)
+    logging.info(steps)
 
     i = 0
     for i, step in enumerate(steps):
         try:
             code = llm_generate(step, io_chain)
         except Exception as e:
-            print("answer_attempt::warning ", e)
+            logging.warn("answer_attempt", e)
             continue
         print(f"<LLM>\n{code}\n</LLM>")
         try:
@@ -149,7 +119,7 @@ def answer_attempt(question):
             io_chain.chain.append(block)
         except Exception as e:
             print("answer_attempt::exception ", e)
-            ns = rectify_loop(step, io_chain, code, e)
+            rectify_loop(step, io_chain, code, e, ns)
 
         if len(io_chain.chain) > 0:
             print(io_chain.chain[-1].result)
@@ -160,7 +130,7 @@ def answer_attempt(question):
 
 def rectify_code(objective: str, io_chain: IOChain, erroneous_code: str, exc: Exception) -> str:
     system = (
-        AGENT_SEED + "Rectify your previous code according to the errors."
+        agent.description + "Rectify your previous code according to the errors."
     )
     prompt = fr"""
 
@@ -178,12 +148,11 @@ Erroneous code:
 {exc}
 ```
 
-Write <= 6 lines of Python to rectify your previous code.
+Write <= 6 lines of Python to rectify the code in the last block.
 If some information like a column name is ambiguous, try to find that out in this cell.
 You will be given another chance to put it all together. Just add a trailing comment "# partial step".
 
 """
-    # + AVAILABLE_FUNCTIONS
     response = model.prompt(prompt, system=system).text()
     code = extract_code(response)
     if code.count("\n") > 6:
@@ -191,31 +160,33 @@ You will be given another chance to put it all together. Just add a trailing com
     return code
 
 # @param inout ic_chain
-def rectify_loop(objective: str, io_chain: IOChain, erroneous_code: str, exc: Exception) -> Dict[str, Any]:
+def rectify_loop(objective: str, io_chain: IOChain, code: str, exc: Exception, ns) -> Dict[str, Any]:
     while True:
-        ns = {}
+        logging.info("rectify_loop::entering")
         try:
-            code = rectify_code(objective, io_chain, erroneous_code, exc)
+            code = rectify_code(objective, io_chain, code, exc)
             code = f"""
-        # {objective}
-        {code}
+# {objective}
+{code}
         """
+            logging.info(f"rectify_loop::llm {code}")
         except Exception as e:
-            print("while asking llm to rectify code: ", e)
+            logging.warn(f"rectify_loop::exception {e}")
             continue
+
         try:
-            result = evaluate_code(io_chain.dump_with(code), ns)
+            result = evaluate_code(code, ns)
         except FunctionTimedOut:
-            result = "<timeout />"
+            continue
         except Exception as e:
             exc = e
-            objective = code
+            logging.info(e)
             continue
         io_chain.chain.append(IOBlock(code, result))
         return ns
 
 def llm_generate(instr: str, io_chain: IOChain, full_question: str = "") -> str:
-    system = AGENT_SEED + "Implement the described function and call it.\n"
+    system = agent.description + "Implement the described function and call it.\n"
     if io_chain:
         system += f"""
 Code from the last {io_chain.limit} cells:
@@ -224,9 +195,7 @@ Code from the last {io_chain.limit} cells:
 
     response = model.prompt(
 f"""
-Write <= 6 line of Python to perform the logic in this pseudocode statement.
-If some information like a column name is ambiguous, try to find that out in this cell.
-You will be given another chance to put it all together. Just add a trailing comment "# partial step".
+Write <= 6 line of Python to perform the logic in this pseudocode statement. In case of ambiguity use print. You will be given multiple chances.
 
 ```python
 # {instr}
@@ -274,9 +243,7 @@ No comments. No imports. No multiline expression.
     print(response)
     actions = []
     for line in response.splitlines():
-        if not line:
-            continue
-        if line.startswith("```"):
+        if not line or line.startswith("```"):
             continue
         try:
             step = Step(line)
