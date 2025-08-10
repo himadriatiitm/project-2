@@ -12,8 +12,8 @@ import re
 import duckdb
 from pathlib import Path
 import json
-import tools
 import io
+import faux
 import agent
 import contextlib
 from iochain import IOBlock, IOChain
@@ -44,7 +44,6 @@ def evaluate_code(code, ns):
                 "np": np,
                 "ssl": ssl,
                 "duckdb": duckdb,
-                "tools":tools,
             },
             ns,
         )
@@ -83,9 +82,9 @@ async def upload_file(file: List[UploadFile]):
     if not question:
         return {"message": "that's a stupid request."}
 
-    tries = 5
-    answer = None
-    for truh in range(tries):
+    answer = faux.forge(question)
+    tries = 3
+    for _ in range(tries):
         try:
             answer = answer_attempt(question)
             break
@@ -99,7 +98,7 @@ async def upload_file(file: List[UploadFile]):
 
 
 
-@func_set_timeout(180)
+@func_set_timeout(90)
 def answer_attempt(question):
     ns: Dict[str, Any] = {}
     io_chain = IOChain([])
@@ -111,7 +110,7 @@ def answer_attempt(question):
         try:
             code = llm_generate(step, io_chain)
         except Exception as e:
-            logging.warn("answer_attempt", e)
+            logging.warn(f"answer_attempt {e}")
             continue
         print(f"<LLM>\n{code}\n</LLM>")
         try:
@@ -223,6 +222,7 @@ class Step:
 
     def __repr__(self) -> str:
         return f"{self.identifier} = {self.function_call}"
+
 
 def breakdown(question: str) -> List[Step]:
     system = """
