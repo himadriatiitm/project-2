@@ -17,8 +17,6 @@ Rules:
 - For base64 images, output `$plot` without any quotes.
 """
     response = model.prompt(question, system=system).text()
-    response = response[response.index('['):]
-    response = response[:response.rindex(']')+1]
     logging.info(response)
     return list_verify(json_verify(response))
 
@@ -28,6 +26,11 @@ def forge(question: str, model) -> List[Any]:
             return faux
 
 def json_verify(response: str):
+    try:
+        response = response[response.index('['):]
+        response = response[:response.rindex(']')+1]
+    except (ValueError,IndexError):
+        return None
     try:
         return json.loads(response)
     except Exception as e:

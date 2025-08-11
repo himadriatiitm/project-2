@@ -1,5 +1,5 @@
 import sandbox
-from fastapi import FastAPI, UploadFile, HTTPException, Response
+from fastapi import FastAPI, UploadFile, HTTPException
 from typing import List, Any, Dict, Callable
 import llm
 import os
@@ -10,11 +10,8 @@ import ssl
 from utils import extract_code
 import duckdb
 from pathlib import Path
-import json
-import io
 import faux
 import agent
-import contextlib
 import logging
 
 # basic monkey-patching
@@ -29,7 +26,14 @@ app = FastAPI()
 model = llm.get_model("gpt-4o")
 model.key = os.environ.get("OPENAI_API_KEY") or "electric-boogaloo"
 
+imports = {
+    "pd": pd,
+    "np": np,
+    "ssl": ssl,
+    "duckdb": duckdb,
+}
 
+# TODO: keep a trace of all transactions
 @app.post("/api/")
 async def upload_file(file: List[UploadFile]):
     """
@@ -58,14 +62,7 @@ async def upload_file(file: List[UploadFile]):
         except FunctionTimedOut:
             continue
 
-    return Response(content=answer, media_type="application/json")
-
-imports = {
-    "pd": pd,
-    "np": np,
-    "ssl": ssl,
-    "duckdb": duckdb,
-}
+    return answer
 
 
 @func_set_timeout(90)
@@ -75,16 +72,25 @@ def answer_attempt(question):
     code = must(breakdown, question)
     logging.info(code)
     result = sandbox.exec(code, imports, ns)
-    print(result)
+    logging.info(f"{result=}")
+    answer = None
 
-    while not faux.list_verify(faux.json_verify(result)):
+    while not (answer := json_list_from_any_line(result)):
         code = must(rectify, question, code, result)
         logging.info(code)
         result = sandbox.exec(code, imports, ns)
-        print(result)
+        logging.info(f"{result=}")
 
-    return result
+    return answer
 
+def json_list_from_any_line(result: str) -> List[Any]:
+    lines = result.strip().splitlines()
+    if len(lines) == 0:
+        return None
+    line = lines[-1]
+    if any((badbad in line.lower() for badbad in ("nan", "not found"))):
+        return None
+    return faux.list_verify(faux.json_verify(line))
 
 def rectify(objective: str, code: str, exc: Exception) -> str:
     system = (
@@ -104,7 +110,9 @@ objective:
 {exc}
 ```
 
-Rectify the code in the last block. In case of doubt, `print`. You will be given multiple chances to put it all together.
+Rectify the code in the last block.
+In case of doubt, `print`. You will be given multiple attempts.
+Always `print(json.dumps(...))` the final list. It may contain int, float and str.
 """
 
     print(f"<to-llm>\n\n{system}\n\n{prompt}\n\n</to-llm>")
@@ -116,7 +124,7 @@ Rectify the code in the last block. In case of doubt, `print`. You will be given
 def breakdown(question: str) -> str:
     system = agent.description + """
 Write python code to solve the following data science question.
-Always `print` the final JSON serialized list.
+Always `print(json.dumps(...))` the final list. It may contain int, float and str.
 """
 
     response = model.prompt(question, system=system).text()
@@ -131,6 +139,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# if all fails, send dummy json with the same schema
-# keep a trace of all transactions
