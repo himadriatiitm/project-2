@@ -1,4 +1,5 @@
-```
-cd jail
-python ../src/main.py
+Look ma, AGI.
+
+``` sh
+python ./src/main.py
 ```
