@@ -12,12 +12,12 @@ import duckdb
 from pathlib import Path
 import faux
 import agent
-import logging
+import structlog
+
 
 # top-level monkey-patching
-logging.basicConfig(level=logging.INFO)
+logging = structlog.get_logger()
 ssl._create_default_https_context = ssl._create_unverified_context
-
 
 def format_ns(ns) -> str:
     return " ".join(list(ns))
@@ -25,7 +25,7 @@ def format_ns(ns) -> str:
 
 app = FastAPI()
 model = llm.get_model("gpt-4o")
-model.key = os.environ.get("OPENAI_API_KEY") or "electric-boogaloo"
+model.key = os.environ.get("OPENAI_API_KEY")
 tries = int(os.environ.get("MAX_TRIES", 3))
 
 
@@ -80,7 +80,7 @@ class Platypus:
         self.code = must(f, self.question, self.code, self.result)
         logging.info(self.code)
         self.result = sandbox.exec(self.code, self.imports, self.ns)
-        logging.info(f"{self.result=}")
+        logging.info("llm generated code executed", result=self.result)
         return last_line_json_list(self.result)
 
 
@@ -101,7 +101,8 @@ def last_line_json_list(result: str) -> List[Any]:
 
 def rectify(objective: str, code: str, exc: str) -> str:
     system = agent.description + "Rectify your previous code according to the errors."
-    prompt = s("""
+    prompt = s(
+        """
         objective:
         ```
         {}
@@ -118,29 +119,13 @@ def rectify(objective: str, code: str, exc: str) -> str:
         Rectify the code in the last block.
         In case of doubt, `print`. You will be given multiple attempts.
         Always `print(json.dumps(...))` the final list. It may contain int, float and str.
-        """, objective, code, exc)
-
-    logging.info(
-        s(
-            """
-        TO LLM:
-
-        SYSTEM:
-        ```
-        {}
-        ```
-
-        PROMPT:
-
-        ```
-        {}
-        ```
         """,
-            system,
-            prompt,
-        )
+        objective,
+        code,
+        exc,
     )
 
+    logging.info("to llm", system=system, prompt=prompt)
     response = model.prompt(prompt, system=system).text()
     return extract_code(response)
 
@@ -160,8 +145,18 @@ def must(f: Callable, *args, **kwargs):
         if v := f(*args, **kwargs):
             return v
 
+def main():
+    if not model.key:
+        logging.error("OPENAI_API_KEY is unset")
+        return
+
+    jail_path = Path("./jail")
+    jail_path.mkdir(exist_ok=True)
+    os.chdir(jail_path)
+    logging.info("changed current directory", path=jail_path)
+
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    main()
