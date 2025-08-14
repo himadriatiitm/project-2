@@ -1,7 +1,8 @@
 import sandbox
-from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi import FastAPI, Request, HTTPException
 from typing import List, Any, Callable
 import llm
+import networkx as nx
 import os
 import pandas as pd
 import numpy as np
@@ -31,18 +32,16 @@ tries = int(os.environ.get("MAX_TRIES", 3))
 
 # TODO: keep a trace of all transactions
 @app.post("/api/")
-async def upload_file(file: List[UploadFile]):
-    """
-    Accepts a text file on the /api/ route and returns its content.
-    """
+async def upload_file(request: Request):
+    form_data = request.form()
     question = None
     try:
-        for handle in file:
-            filename = Path(handle.filename).name
-            if filename == "question.txt":
-                question = (await handle.read()).decode()
-                continue
-            Path(filename).write_bytes(await handle.read())
+        for form_filename, in_file in form_data.items():
+            name = Path(form_filename).name
+            if name in ('questions.txt', 'question.txt'):
+                question = await in_file.read().decode()
+            save_to = Path(name)
+            save_to.write_bytes(await in_file.read())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"error reading file: {str(e)}")
 
@@ -70,6 +69,7 @@ class Platypus:
             "np": np,
             "ssl": ssl,
             "duckdb": duckdb,
+            "nx": nx,
         }
         self.ns = dict()
         self.result = None
