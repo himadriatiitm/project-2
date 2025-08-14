@@ -33,13 +33,13 @@ tries = int(os.environ.get("MAX_TRIES", 3))
 # TODO: keep a trace of all transactions
 @app.post("/api/")
 async def upload_file(request: Request):
-    form_data = request.form()
+    form_data = await request.form()
     question = None
     try:
         for form_filename, in_file in form_data.items():
             name = Path(form_filename).name
             if name in ('questions.txt', 'question.txt'):
-                question = await in_file.read().decode()
+                question = (await in_file.read()).decode()
             save_to = Path(name)
             save_to.write_bytes(await in_file.read())
     except Exception as e:
