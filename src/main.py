@@ -4,6 +4,10 @@ from typing import List, Any, Callable
 import llm
 import networkx as nx
 import os
+import io
+import json
+import base64
+from io import BytesIO
 import pandas as pd
 import numpy as np
 from func_timeout import func_set_timeout, FunctionTimedOut
@@ -14,11 +18,13 @@ from pathlib import Path
 import faux
 import agent
 import structlog
+import matplotlib.pyplot as plt
 
 
 # top-level monkey-patching
 logging = structlog.get_logger()
 ssl._create_default_https_context = ssl._create_unverified_context
+
 
 def format_ns(ns) -> str:
     return " ".join(list(ns))
@@ -38,7 +44,7 @@ async def upload_file(request: Request):
     try:
         for form_filename, in_file in form_data.items():
             name = Path(form_filename).name
-            if name in ('questions.txt', 'question.txt'):
+            if name in ("questions.txt", "question.txt"):
                 question = (await in_file.read()).decode()
             save_to = Path(name)
             save_to.write_bytes(await in_file.read())
@@ -70,6 +76,10 @@ class Platypus:
             "ssl": ssl,
             "duckdb": duckdb,
             "nx": nx,
+            "BytesIO": BytesIO,
+            "plt": plt,
+            "io": io,
+            "base64": base64,
         }
         self.ns = dict()
         self.result = None
@@ -81,7 +91,7 @@ class Platypus:
         logging.info(self.code)
         self.result = sandbox.exec(self.code, self.imports, self.ns)
         logging.info("llm generated code executed", result=self.result)
-        return last_line_json_list(self.result)
+        return json_from_last_line(self.result)
 
 
 @func_set_timeout(90)
@@ -89,14 +99,18 @@ def answer_attempt(question):
     return must(Platypus(question))
 
 
-def last_line_json_list(result: str) -> List[Any]:
+def json_from_last_line(result: str) -> List[Any]:
     lines = result.strip().splitlines()
     if len(lines) == 0:
         return None
     line = lines[-1]
     if any((badbad in line.lower() for badbad in ("nan", "not found"))):
         return None
-    return faux.list_verify(faux.json_verify(line))
+    try:
+        return json.loads(line)
+    except Exception as e:
+        logging.error("failed to parse JSON", e)
+        return None
 
 
 def rectify(objective: str, code: str, exc: str) -> str:
@@ -145,6 +159,7 @@ def must(f: Callable, *args, **kwargs):
         if v := f(*args, **kwargs):
             return v
 
+
 def main():
     if not model.key:
         logging.error("OPENAI_API_KEY is unset")
@@ -156,7 +171,9 @@ def main():
     logging.info("changed current directory", path=jail_path)
 
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 if __name__ == "__main__":
     main()
