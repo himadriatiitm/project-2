@@ -9,10 +9,7 @@ app = FastAPI()
 @app.post("/api/")
 async def api(request: Request):
     form_data = await request.form()
-    question = form_data.get("question.txt")
     answer = None
-    if not question:
-        return None
 
     criteria = {
         "sample-sales.csv": "sales.json",
@@ -29,6 +26,9 @@ async def api(request: Request):
 
         save_to.write_bytes(await in_file.read())
 
+    question = form_data.get("questions.txt")
     question = await question.read()
+    if not question:
+        return None
     return Response(content=answer, media_type="application/json")
     return question
