@@ -39,9 +39,9 @@ async def upload_file(file: List[UploadFile]):
     try:
         for handle in file:
             filename = Path(handle.filename).name
-            if filename == "question.txt":
-                question = (await handle.read()).decode()
-                continue
+            # if filename == "question.txt":
+            #     question = (await handle.read()).decode()
+            #     continue
             Path(filename).write_bytes(await handle.read())
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"error reading file: {str(e)}")
