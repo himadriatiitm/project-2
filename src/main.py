@@ -2,22 +2,23 @@ import sandbox
 from fastapi import FastAPI, Request, HTTPException
 from typing import List, Any, Callable
 import llm
-import networkx as nx
 import os
 import io
 import json
-import base64
 from io import BytesIO
 import pandas as pd
 import numpy as np
-from func_timeout import func_set_timeout, FunctionTimedOut
-import ssl
-from utils import extract_code, s
 import duckdb
+import base64
+import networkx as nx
+import ssl
+from func_timeout import func_set_timeout, FunctionTimedOut
+from utils import extract_code, s, truncate_string
 from pathlib import Path
 import faux
 import agent
 import structlog
+import requests
 import matplotlib.pyplot as plt
 
 
@@ -29,10 +30,21 @@ ssl._create_default_https_context = ssl._create_unverified_context
 def format_ns(ns) -> str:
     return " ".join(list(ns))
 
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NpEncoder, self).default(obj)
+
 
 app = FastAPI()
 model = llm.get_model("gpt-4o")
 model.key = os.environ.get("OPENAI_API_KEY")
+aipipe_token = os.environ.get("AIPIPE_TOKEN")
 tries = int(os.environ.get("MAX_TRIES", 3))
 
 
@@ -54,7 +66,7 @@ async def upload_file(request: Request):
     if not question:
         return {"message": "next time, come up with a question I can answer."}
 
-    answer = must(faux.forge, question, model)
+    answer = must(faux.forge, question, prompt)
     for _ in range(tries):
         try:
             answer = answer_attempt(question)
@@ -98,6 +110,38 @@ class Platypus:
 def answer_attempt(question):
     return must(Platypus(question))
 
+def prompt(prompt: str, system: str, model_name: str = "gpt-4o") -> str:
+    # openai
+    if model.key:
+        print(model.key)
+        return model.prompt(prompt, system=system).text()
+
+    # aipipe
+    headers = {
+        "Authorization": f"Bearer {aipipe_token}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 1000,
+        "temperature": 0,
+    }
+
+    response = requests.post(
+        "https://aipipe.org/openai/v1/chat/completions",
+        headers=headers,
+        json=data
+    )
+    
+    response.raise_for_status()
+    result = response.json()
+    return result['choices'][0]['message']['content'].strip()
+
 
 def json_from_last_line(result: str) -> List[Any]:
     lines = result.strip().splitlines()
@@ -106,22 +150,28 @@ def json_from_last_line(result: str) -> List[Any]:
     line = lines[-1]
     if any((badbad in line.lower() for badbad in ("nan", "not found"))):
         return None
+    logging.info("maybe JSON from last line", line=truncate_string(line))
+    if not line or line[0] not in "[{":
+        return None
     try:
         return json.loads(line)
     except Exception as e:
-        logging.error("failed to parse JSON", e)
+        logging.error("failed to parse JSON", error=e)
         return None
 
 
 def rectify(objective: str, code: str, exc: str) -> str:
     system = agent.description + "Rectify your previous code according to the errors."
+    hints = ""
+    if "KeyError" in exc:
+        hints += "Maybe you indexed into a nonexistent column, see intermediate results printed from the previous output.\n"
     prompt = s(
         """
         objective:
         ```
         {}
         ```
-
+        
         ```python
         {}
         ```
@@ -131,27 +181,42 @@ def rectify(objective: str, code: str, exc: str) -> str:
         ```
 
         Rectify the code in the last block.
-        In case of doubt, `print`. You will be given multiple attempts.
-        Always `print(json.dumps(...))` the final list. It may contain int, float and str.
+        {}
+        Keep printing sanity checks and intermediate results like column names.
+        End with `print(json.dumps(result, cls=NpEncoder))`
         """,
         objective,
         code,
         exc,
+        hints,
     )
 
-    logging.info("to llm", system=system, prompt=prompt)
-    response = model.prompt(prompt, system=system).text()
+    # logging.info("to llm", system=system, prompt=prompt)
+    response = prompt(truncate_string(prompt), system=system)
     return extract_code(response)
 
 
 def generate(question: str, *args) -> str:
     system = agent.description + s("""\
         Write python code to solve the following data science question.
-        Always `print(json.dumps(...))` the final list. It may contain int, float and str.
+
+        Modules already imported for you:
+        ```python
+        from io import BytesIO
+        import pandas as pd
+        import numpy as np
+        import duckdb
+        import base64
+        import networkx as nx
+        ```
+
+        Keep printing intermediate results like column names.
+        End with `print(json.dumps(result, cls=NpEncoder))`
         """)
 
-    response = model.prompt(question, system=system).text()
-    return extract_code(response)
+    response = prompt(question, system=system)
+    # The more I control, the better
+    return extract_code(response) + '\njson.dumps(result, cls=NpEncoder)'
 
 
 def must(f: Callable, *args, **kwargs):
@@ -161,8 +226,8 @@ def must(f: Callable, *args, **kwargs):
 
 
 def main():
-    if not model.key:
-        logging.error("OPENAI_API_KEY is unset")
+    if not model.key and not aipipe_token:
+        logging.error("OPENAI_API_KEY or AIPIPE_TOKEN is unset")
         return
 
     jail_path = Path("./jail")
