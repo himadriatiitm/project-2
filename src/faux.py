@@ -6,7 +6,6 @@ import re
 
 JSON_EXPRESSION = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 
-
 def forge(question: str, prompt_fn) -> List[Any] | None:
     system = dedent("""\
         Generate the most believable output. It will always be a JSON array.
@@ -17,6 +16,7 @@ def forge(question: str, prompt_fn) -> List[Any] | None:
         - Percentages, correlations, and the like must be floating point `Number`s.
         - For base64 images, output the dummy string "$plot".""")
 
+    logging.info("sending faking request")
     response = prompt_fn(question, system=system)
     logging.info(response)
     return json_verify(response)

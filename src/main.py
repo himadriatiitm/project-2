@@ -20,6 +20,8 @@ import agent
 import structlog
 import requests
 import matplotlib.pyplot as plt
+import httpx
+from asyncio import create_task, as_completed
 
 
 # top-level monkey-patching
@@ -47,26 +49,34 @@ model.key = os.environ.get("OPENAI_API_KEY")
 aipipe_token = os.environ.get("AIPIPE_TOKEN")
 tries = int(os.environ.get("MAX_TRIES", 3))
 
+client = httpx.AsyncClient(timeout=None)
 
-# TODO: keep a trace of all transactions
 @app.post("/api/")
 async def upload_file(request: Request):
     form_data = await request.form()
     question = None
+    files = {}
     try:
         for form_filename, in_file in form_data.items():
             name = Path(form_filename).name
             if name in ("questions.txt", "question.txt"):
                 question = (await in_file.read()).decode()
             save_to = Path(name)
+            logging.info("saving input file", name=name)
             save_to.write_bytes(await in_file.read())
+            files[form_filename] = open(name, 'rb')
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"error reading file: {str(e)}")
 
     if not question:
         return {"message": "next time, come up with a question I can answer."}
 
-    answer = must(faux.forge, question, prompt)
+    try:
+        answer = must(faux.forge, question, prompt_fn)
+        logging.info('faked an answer', answer=answer)
+    except FunctionTimedOut:
+        return {"message": "next time, come up with a question I can guess."}
+
     for _ in range(tries):
         try:
             answer = answer_attempt(question)
@@ -92,6 +102,7 @@ class Platypus:
             "plt": plt,
             "io": io,
             "base64": base64,
+            "NpEncoder": NpEncoder,
         }
         self.ns = dict()
         self.result = None
@@ -102,7 +113,7 @@ class Platypus:
         self.code = must(f, self.question, self.code, self.result)
         logging.info(self.code)
         self.result = sandbox.exec(self.code, self.imports, self.ns)
-        logging.info("llm generated code executed", result=self.result)
+        logging.info("llm generated code executed", result=truncate_string(self.result))
         return json_from_last_line(self.result)
 
 
@@ -110,7 +121,7 @@ class Platypus:
 def answer_attempt(question):
     return must(Platypus(question))
 
-def prompt(prompt: str, system: str, model_name: str = "gpt-4o") -> str:
+def prompt_fn(prompt: str, system: str, model_name: str = "gpt-4o") -> str:
     # openai
     if model.key:
         print(model.key)
@@ -192,7 +203,7 @@ def rectify(objective: str, code: str, exc: str) -> str:
     )
 
     # logging.info("to llm", system=system, prompt=prompt)
-    response = prompt(truncate_string(prompt), system=system)
+    response = prompt_fn(prompt, system=system)
     return extract_code(response)
 
 
@@ -214,11 +225,12 @@ def generate(question: str, *args) -> str:
         End with `print(json.dumps(result, cls=NpEncoder))`
         """)
 
-    response = prompt(question, system=system)
+    response = prompt_fn(question, system=system)
     # The more I control, the better
-    return extract_code(response) + '\njson.dumps(result, cls=NpEncoder)'
+    return extract_code(response)
 
 
+@func_set_timeout(90)
 def must(f: Callable, *args, **kwargs):
     while True:
         if v := f(*args, **kwargs):
