@@ -1,8 +1,10 @@
-import logging
 import json
 from typing import List, Any
 from textwrap import dedent
 import re
+import structlog
+
+logging = structlog.get_logger()
 
 JSON_EXPRESSION = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 

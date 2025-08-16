@@ -21,7 +21,6 @@ import structlog
 import requests
 import matplotlib.pyplot as plt
 import httpx
-from asyncio import create_task, as_completed
 
 
 # top-level monkey-patching
@@ -55,7 +54,6 @@ client = httpx.AsyncClient(timeout=None)
 async def upload_file(request: Request):
     form_data = await request.form()
     question = None
-    files = {}
     try:
         for form_filename, in_file in form_data.items():
             name = Path(form_filename).name
@@ -64,7 +62,6 @@ async def upload_file(request: Request):
             save_to = Path(name)
             logging.info("saving input file", name=name)
             save_to.write_bytes(await in_file.read())
-            files[form_filename] = open(name, 'rb')
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"error reading file: {str(e)}")
 
@@ -124,7 +121,6 @@ def answer_attempt(question):
 def prompt_fn(prompt: str, system: str, model_name: str = "gpt-4o") -> str:
     # openai
     if model.key:
-        print(model.key)
         return model.prompt(prompt, system=system).text()
 
     # aipipe
@@ -140,9 +136,9 @@ def prompt_fn(prompt: str, system: str, model_name: str = "gpt-4o") -> str:
             {"role": "user", "content": prompt}
         ],
         "max_tokens": 1000,
-        "temperature": 0,
     }
 
+    logging.info("sending prompt request for completions")
     response = requests.post(
         "https://aipipe.org/openai/v1/chat/completions",
         headers=headers,
@@ -202,7 +198,7 @@ def rectify(objective: str, code: str, exc: str) -> str:
         hints,
     )
 
-    # logging.info("to llm", system=system, prompt=prompt)
+    logging.info("to llm", system=system, prompt=prompt)
     response = prompt_fn(prompt, system=system)
     return extract_code(response)
 
@@ -226,7 +222,6 @@ def generate(question: str, *args) -> str:
         """)
 
     response = prompt_fn(question, system=system)
-    # The more I control, the better
     return extract_code(response)
 
 
