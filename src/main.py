@@ -18,10 +18,8 @@ from pathlib import Path
 import faux
 import agent
 import structlog
-import requests
-import matplotlib.pyplot as plt
 import httpx
-
+import matplotlib.pyplot as plt
 
 # top-level monkey-patching
 logging = structlog.get_logger()
@@ -47,8 +45,6 @@ model = llm.get_model("gpt-4o")
 model.key = os.environ.get("OPENAI_API_KEY")
 aipipe_token = os.environ.get("AIPIPE_TOKEN")
 tries = int(os.environ.get("MAX_TRIES", 3))
-
-client = httpx.AsyncClient(timeout=None)
 
 @app.post("/api/")
 async def upload_file(request: Request):
@@ -139,7 +135,7 @@ def prompt_fn(prompt: str, system: str, model_name: str = "gpt-4o") -> str:
     }
 
     logging.info("sending prompt request for completions")
-    response = requests.post(
+    response = httpx.post(
         "https://aipipe.org/openai/v1/chat/completions",
         headers=headers,
         json=data
